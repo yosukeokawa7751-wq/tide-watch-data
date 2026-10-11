@@ -1,0 +1,25 @@
+# Sentinel-3 OLCI の試験(手動のみ)。結果はログと成果物 s3probe.json。データは commit しない。
+name: s3probe
+on:
+  workflow_dispatch:
+    inputs:
+      start: { description: "開始日 YYYY-MM-DD", required: true, default: "2026-10-08" }
+      end:   { description: "終了日 YYYY-MM-DD", required: true, default: "2026-10-10" }
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install numpy requests netCDF4
+      - run: python turbidity/s3probe.py "${{ inputs.start }}" "${{ inputs.end }}"
+        env:
+          CDSE_USER: ${{ secrets.CDSE_USER }}
+          CDSE_PASSWORD: ${{ secrets.CDSE_PASSWORD }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: s3probe, path: s3probe.json, if-no-files-found: ignore }
