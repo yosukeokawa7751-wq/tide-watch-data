@@ -28,8 +28,11 @@ def search(start, end):
     f = (f"Collection/Name eq 'SENTINEL-3' and contains(Name,'OL_2_WFR') and "
          f"OData.CSC.Intersects(area=geography'SRID=4326;{poly}') and "
          f"ContentDate/Start ge {start}T00:00:00.000Z and ContentDate/Start le {end}T23:59:59.999Z")
-    r = requests.get(CAT, params={"$filter": f, "$orderby": "ContentDate/Start asc", "$top": 100}, timeout=120)
-    r.raise_for_status(); return r.json()["value"]
+    out = []
+    while True:   # 1回は最大100件。1か月で120件ほどあるので繰り返す
+        r = requests.get(CAT, params={"$filter": f, "$orderby": "ContentDate/Start asc", "$top": 100, "$skip": len(out)}, timeout=120)
+        r.raise_for_status(); v = r.json()["value"]; out += v
+        if len(v) < 100: return out
 
 def fetch(sess, pid, pname, fname, out):
     url = f"{DL}({pid})/Nodes({pname})/Nodes({fname})/$value"
