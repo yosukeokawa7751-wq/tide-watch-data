@@ -48,6 +48,46 @@ def var(path, name):
         attrs = {k: v.getncattr(k) for k in v.ncattrs()}
     return np.ma.filled(a.astype(float), np.nan) if a.dtype.kind == "f" else np.ma.filled(a, 0), attrs
 
+def cells_mode(start, end, out_csv):
+    """全区画の TSM_NN 中央値を CSV に(date,iy,ix,tsm_x100,n)。同じ撮影は NT を優先し NR を捨てる。"""
+    tok = token(); t_tok = time.time()
+    sess = requests.Session(); sess.headers["Authorization"] = f"Bearer {tok}"
+    items = search(start, end)
+    by = {}
+    for it in items:
+        k = it["Name"][:47]   # 衛星+種別+撮影の始まりと終わり
+        if k not in by or "_NT_" in it["Name"]: by[k] = it
+    items = sorted(by.values(), key=lambda x: x["ContentDate"]["Start"])
+    print(f"{len(items)} 枚", flush=True)
+    w = open(out_csv, "w"); w.write("date,iy,ix,tsm_x100,n,sat\n")
+    for k, it in enumerate(items):
+        if time.time() - t_tok > 480:
+            tok = token(); t_tok = time.time(); sess.headers["Authorization"] = f"Bearer {tok}"
+        name, pid = it["Name"], it["Id"]
+        try:
+            got = {}
+            for f in ["geo_coordinates.nc", "wqsf.nc", "tsm_nn.nc"]:
+                fetch(sess, pid, name, f, f"/tmp/{f}"); got[f] = f"/tmp/{f}"
+            lat, _ = var(got["geo_coordinates.nc"], "latitude"); lon, _ = var(got["geo_coordinates.nc"], "longitude")
+            wq, wa = var(got["wqsf.nc"], "WQSF")
+            badmask = 0
+            for nm, m in zip(wa["flag_meanings"].split(), [int(m) for m in np.atleast_1d(wa["flag_masks"])]):
+                if nm in BAD: badmask |= m
+            tsm, _ = var(got["tsm_nn.nc"], "TSM_NN")
+        except Exception as e:
+            print("  失敗", name, e, flush=True); continue
+        inr = (lon >= REGION[0]) & (lon < REGION[2]) & (lat >= REGION[1]) & (lat < REGION[3])
+        ok = inr & ((wq.astype(np.uint64) & np.uint64(badmask)) == 0) & np.isfinite(tsm)
+        key = np.floor((lat[ok] - LAT0) / DLAT).astype(int) * 100000 + np.floor((lon[ok] - LON0) / DLON).astype(int)
+        v = np.power(10, tsm[ok]); o = np.argsort(key); key, v = key[o], v[o]
+        uk, idx, cnt = np.unique(key, return_index=True, return_counts=True)
+        date = it["ContentDate"]["Start"][:10]; n = 0
+        for kk, i, c in zip(uk, idx, cnt):
+            if c < 5: continue
+            w.write(f"{date},{kk // 100000},{kk % 100000},{round(float(np.median(v[i:i + c])) * 100)},{c},{name[:3]}\n"); n += 1
+        w.flush()
+        print(f"  {k + 1}/{len(items)} {name[:47]} 区画{n}", flush=True)
+
 def main(start, end):
     tok = token()
     sess = requests.Session(); sess.headers["Authorization"] = f"Bearer {tok}"
@@ -92,4 +132,5 @@ def main(start, end):
     json.dump(res, open("s3probe.json", "w"), ensure_ascii=False, indent=1)
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    if len(sys.argv) > 3: cells_mode(sys.argv[1], sys.argv[2], sys.argv[3])
+    else: main(sys.argv[1], sys.argv[2])
