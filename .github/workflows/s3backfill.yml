@@ -1,4 +1,4 @@
-# Sentinel-3 の過去分(基準づくり)。手動のみ。月ごとに並べ、結果は成果物(CSV)。手元でまとめて obs_s3.csv に入れる。
+# Sentinel-3 の過去分(基準づくり)。手動のみ。月ごとに並べ、結果は成果物(CSV)。手元でまとめて obs/s3_YYYY.csv に入れる。
 # Copernicus は同時の接続数に上限があるので、並べるのは4本まで。
 name: s3backfill
 on:

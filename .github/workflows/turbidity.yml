@@ -1,7 +1,7 @@
 # 衛星(Sentinel-2)の画像から、海岸沿いの区画ごとの「いつもより濁っているか」を毎日出す。
 # 時計アプリ(タイド)は turbidity/latest.json だけを取りに来る(Sentinel-3 で埋めた区画も混ざる。2026-10-11〜)。
 # Sentinel-2 の撮影は日本時間10:37ごろ。公開は撮影の約4〜5時間後(実測 2026-10-11: Earth Search 3.8〜5.0時間)。
-# 1回は約40秒で終わるので、公開されうる 日本時間12〜18時は毎時、ほかに23時に回す(当日の画像を早く出すため)。
+# 1回は約40秒(房総・東京湾だけの頃。仙台〜三重に広げた後は数分の見込み)で終わるので、公開されうる 日本時間12〜18時は毎時、ほかに23時に回す(当日の画像を早く出すため)。
 name: turbidity
 on:
   schedule:
@@ -38,7 +38,7 @@ jobs:
         run: |
           git config user.name "turbidity-bot"
           git config user.email "turbidity-bot@users.noreply.github.com"
-          git add turbidity/obs.csv turbidity/latest.json
-          git add turbidity/obs_s3.csv turbidity/latest_s3.json 2>/dev/null || true
+          git add turbidity/obs turbidity/latest.json
+          git add turbidity/latest_s3.json 2>/dev/null || true
           git diff --cached --quiet || git commit -m "turbidity: $(date -u +%Y-%m-%dT%H:%MZ)"
           git push

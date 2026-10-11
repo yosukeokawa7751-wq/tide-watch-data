@@ -11,7 +11,7 @@ S2 が強の日のうち S3 も強は15%)。一方で測れる日は5倍あり(�
 - 取得には Copernicus Data Space のアカウントが要る(環境変数 CDSE_USER / CDSE_PASSWORD。GitHub の Secrets)
 
   python s3.py backfill 2023-01-01 2023-01-31 [出力CSV]   # 過去分(NT版を優先)。月ごとに分けて Actions で回す
-  python s3.py daily                                       # 直近2日ぶんを obs_s3.csv に足して latest_s3.json を書き、latest.json に混ぜる
+  python s3.py daily                                       # 直近2日ぶんを obs/s3_YYYY.csv に足して latest_s3.json を書き、latest.json に混ぜる
   python s3.py latest [YYYY-MM-DD]                         # 記録から latest_s3.json と latest.json を書き直す
 """
 import csv, datetime as dt, json, os, sys, time
@@ -19,7 +19,7 @@ import numpy as np, requests, netCDF4
 import pipeline as p
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OBS = os.path.join(HERE, "obs_s3.csv")
+S3_STORE = ("s3", "tsm_x100", 100)
 LATEST = os.path.join(HERE, "latest_s3.json")
 TOKEN_URL = "https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token"
 CAT = "https://catalogue.dataspace.copernicus.eu/odata/v1/Products"
@@ -48,7 +48,9 @@ class Session:
         return self.s.get(url, **kw)
 
 def search(start, end):
-    w, s, e, n = p.REGION
+    # 範囲すべてを囲む長方形で探す(1枚が約1,200km四方なので、ほとんど同じ画像に入る)
+    w, s, e, n = (min(r[1] for r in p.REGIONS), min(r[2] for r in p.REGIONS),
+                  max(r[3] for r in p.REGIONS), max(r[4] for r in p.REGIONS))
     poly = f"POLYGON(({w} {s},{e} {s},{e} {n},{w} {n},{w} {s}))"
     f = (f"Collection/Name eq 'SENTINEL-3' and contains(Name,'OL_2_WFR') and "
          f"OData.CSC.Intersects(area=geography'SRID=4326;{poly}') and "
@@ -93,27 +95,17 @@ def process(sess, it):
     bad = 0
     for nm, m in zip(wa["flag_meanings"].split(), [int(m) for m in np.atleast_1d(wa["flag_masks"])]):
         if nm in BAD: bad |= m
-    R = p.REGION
-    ok = (lon >= R[0]) & (lon < R[2]) & (lat >= R[1]) & (lat < R[3]) & ((wq.astype(np.uint64) & np.uint64(bad)) == 0) & np.isfinite(tsm)
+    ok = p.in_region(lat, lon) & ((wq.astype(np.uint64) & np.uint64(bad)) == 0) & np.isfinite(tsm)
     iy, ix = p.cell_of(lat[ok], lon[ok]); key = iy * 100000 + ix
     v = np.power(10, tsm[ok]); o = np.argsort(key); key, v = key[o], v[o]
     uk, idx, cnt = np.unique(key, return_index=True, return_counts=True)
     return {(int(k // 100000), int(k % 100000)): (float(np.median(v[i:i + c])), int(c))
             for k, i, c in zip(uk, idx, cnt) if c >= MIN_PX}
 
-def load_obs(path=OBS):
-    d = {}
-    if os.path.exists(path):
-        for r in csv.reader(open(path)):
-            if r and r[0] != "date": d[(r[0], int(r[1]), int(r[2]))] = (int(r[3]) / 100, int(r[4]))
-    return d
+def load_obs(path=None): return p.load_store(S3_STORE, path)
+def save_obs(d, path=None): p.save_store(d, S3_STORE, path)
 
-def save_obs(d, path=OBS):
-    with open(path, "w", newline="") as f:
-        w = csv.writer(f); w.writerow(["date", "iy", "ix", "tsm_x100", "n"])
-        for (date, iy, ix), (v, n) in sorted(d.items()): w.writerow([date, iy, ix, round(v * 100), n])
-
-def ingest(start, end, path=OBS):
+def ingest(start, end, path=None):
     obs = load_obs(path); sess = Session()
     items = search(start, end); print(f"{len(items)} 枚", flush=True)
     for k, it in enumerate(items):
@@ -167,7 +159,7 @@ def write_merged(obs3, today):
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "backfill":
-        ingest(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else OBS)
+        ingest(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else None)
     elif cmd == "daily":
         t = dt.date.today()
         obs = ingest((t - dt.timedelta(days=2)).isoformat(), t.isoformat())

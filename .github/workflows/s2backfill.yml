@@ -1,0 +1,44 @@
+# Sentinel-2 の過去分(基準づくり)。手動のみ。月ごとに並べ、結果は成果物(CSV)。手元でまとめて obs/s2_YYYY.csv に入れる。
+# regions は pipeline.py の REGIONS の番号(例 1,2,3,4,5 = 範囲を広げた時に足した所だけを探す)。
+name: s2backfill
+on:
+  workflow_dispatch:
+    inputs:
+      start:   { description: "最初の月 YYYY-MM", required: true, default: "2023-01" }
+      end:     { description: "最後の月 YYYY-MM", required: true, default: "2026-10" }
+      regions: { description: "範囲の番号(カンマ区切り)", required: true, default: "1,2,3,4,5" }
+permissions:
+  contents: read
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs: { m: "${{ steps.p.outputs.m }}" }
+    steps:
+      - id: p
+        run: |
+          python3 - <<'PY' >> $GITHUB_OUTPUT
+          import json
+          y, m = map(int, "${{ inputs.start }}".split("-")); ey, em = map(int, "${{ inputs.end }}".split("-"))
+          out = []
+          while (y, m) <= (ey, em):
+              out.append(f"{y}-{m:02d}"); m += 1
+              if m > 12: y, m = y + 1, 1
+          print("m=" + json.dumps(out))
+          PY
+  month:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    strategy: { fail-fast: false, max-parallel: 8, matrix: { month: "${{ fromJson(needs.plan.outputs.m) }}" } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: turbidity/requirements.txt }
+      - run: pip install -r turbidity/requirements.txt
+      - run: |
+          M=${{ matrix.month }}
+          E=$(python3 -c "import calendar as c;y,m=map(int,'$M'.split('-'));print(f'{y}-{m:02d}-{c.monthrange(y,m)[1]}')")
+          cd turbidity && python pipeline.py backfill $M-01 $E ../s2_$M.csv ${{ inputs.regions }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: "s2-${{ matrix.month }}", path: "s2_*.csv", if-no-files-found: ignore }

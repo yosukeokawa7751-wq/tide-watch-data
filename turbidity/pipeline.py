@@ -10,12 +10,14 @@
   夏はプランクトンや照り返しで赤が秋の数倍になるため（館山湾の中央: 6月0.092 / 10月0.013）、値そのものでは決めない
 - 段階: 2=強（同じ時季の上位1割かつ中央値の1.5倍以上） 1=やや強（上位4分の1かつ1.25倍以上） 0=なし
 
+- 観測は obs/s2_YYYY.csv に年ごとに置く（1ファイル100MBの GitHub の上限に掛からないように。2026-10-11 に範囲を広げた時に分けた）
+
 使い方:
-  python pipeline.py backfill 2023-01-01 2026-10-10   # 過去ぶんを obs.csv に足す
+  python pipeline.py backfill 2023-01-01 2026-10-10 [出力CSV] [範囲の番号 例 1,2,3]   # 過去ぶん。出力を省くと obs/ に足す
   python pipeline.py daily                             # 直近3日ぶんを足して latest.json を書く
-  python pipeline.py latest [YYYY-MM-DD]               # obs.csv から latest.json だけ書き直す（日付は「今日」の代わり）
+  python pipeline.py latest [YYYY-MM-DD]               # obs/ から latest.json だけ書き直す（日付は「今日」の代わり）
 """
-import csv, datetime as dt, json, math, os, sys, threading, time, urllib.request
+import csv, datetime as dt, glob, json, math, os, sys, threading, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import rasterio
@@ -23,13 +25,29 @@ from rasterio.enums import Resampling
 from pyproj import Transformer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OBS = os.path.join(HERE, "obs.csv")
+OBS_DIR = os.path.join(HERE, "obs")
 LATEST = os.path.join(HERE, "latest.json")
 
-# 房総・東京湾・三浦・相模湾。広げる時は LON0/LAT0 を変えない（区画の番号が変わる）
+# 広げる時は LON0/LAT0 を変えない（区画の番号が変わる）
 LAT0, LON0 = 30.0, 128.0
 DLAT, DLON = 0.02, 0.025
-REGION = (139.0, 34.85, 140.9, 35.75)   # 西, 南, 東, 北
+# 範囲（西, 南, 東, 北）。この長方形のどれかに入る画素だけを使う。1つの大きな長方形にすると内陸を大量に読む。
+# 2026-10-11 に仙台〜三重へ広げた（ユーザー判断）。0番は最初からの範囲
+# 岸から10km以内の海が抜けないことを Natural Earth の海岸線で確かめた(本州の太平洋側・北緯33.65〜38.45 の3,016区画で漏れ0)。
+# 宮城は 38.10 で分けた(1つにすると東の沖が無駄に広い)。重なりは構わない(どれかに入ればよい・同じ画像は1回だけ読む)
+REGIONS = [
+    ("房総・東京湾・三浦・相模湾", 139.00, 34.85, 140.90, 35.75),
+    ("福島〜茨城・犬吠埼", 140.50, 35.58, 141.15, 38.10),
+    ("仙台湾・牡鹿", 140.85, 38.10, 141.70, 38.45),
+    ("静岡(伊豆・駿河湾・遠州)", 137.40, 34.50, 139.25, 35.20),
+    ("愛知・三重(新宮の南まで)", 135.95, 33.64, 137.40, 35.10),
+    ("房総南端沖", 139.75, 34.80, 140.00, 34.85),
+]
+
+def in_region(lat, lon, regions=None):
+    m = np.zeros(np.shape(lat), bool)
+    for _, w, s, e, n in (regions or REGIONS): m |= (lon >= w) & (lon < e) & (lat >= s) & (lat < n)
+    return m
 RES = 40.0                               # 読む細かさ(m)。COG の縮小版をそのまま使う
 MIN_CLEAR_PX = 40                        # 40m×40m×40 ≒ 0.064km² 以上の晴れた水面
 MIN_CLEAR_FRAC = 0.6                     # 水面・雲・影の合計のうち晴れた水面の割合
@@ -43,8 +61,15 @@ SCL_OBSCURED = (3, 7, 8, 9, 10)          # 影・不明・雲(中/高)・薄雲
 def cell_of(lat, lon):
     return np.floor((lat - LAT0) / DLAT).astype(int), np.floor((lon - LON0) / DLON).astype(int)
 
-def stac_items(start, end, max_cloud=60):
-    body = {"collections": ["sentinel-2-l2a"], "bbox": list(REGION),
+def stac_items(start, end, max_cloud=60, regions=None):
+    """範囲ごとに探して、同じ画像は1つにまとめる"""
+    seen = {}
+    for _, w, s, e, n in (regions or REGIONS):
+        for f in stac_box(start, end, (w, s, e, n), max_cloud): seen[f["id"]] = f
+    return list(seen.values())
+
+def stac_box(start, end, bbox, max_cloud):
+    body = {"collections": ["sentinel-2-l2a"], "bbox": list(bbox),
             "datetime": f"{start}T00:00:00Z/{end}T23:59:59Z", "limit": 100,
             "query": {"eo:cloud_cover": {"lt": max_cloud}}}
     url, out = STAC, []
@@ -80,7 +105,7 @@ def cell_keys(tr, crs, shape):
     ys, xs = np.mgrid[0:shape[0], 0:shape[1]]
     X = tr.c + (xs + 0.5) * RES; Y = tr.f - (ys + 0.5) * RES
     lon, lat = Transformer.from_crs(crs, 4326, always_xy=True).transform(X, Y)
-    inr = (lon >= REGION[0]) & (lon < REGION[2]) & (lat >= REGION[1]) & (lat < REGION[3])
+    inr = in_region(lat, lon)
     iy, ix = cell_of(lat, lon)
     key = np.where(inr, iy * 100000 + ix, -1)
     with _KEYS_LOCK: _KEYS[k] = key
@@ -110,21 +135,42 @@ def process(item):
         out[(int(k // 100000), int(k % 100000))] = (float(np.median(rv[i:i + n])), int(n))
     return out
 
-def load_obs():
+S2_STORE = ("s2", "red_minus_swir_x1e5", 1e5)
+
+def read_csv(path, scale):
     d = {}
-    if os.path.exists(OBS):
-        for r in csv.reader(open(OBS)):
-            if r and r[0] != "date": d[(r[0], int(r[1]), int(r[2]))] = (int(r[3]) / 1e5, int(r[4]))
+    for r in csv.reader(open(path)):
+        if r and r[0] != "date": d[(r[0], int(r[1]), int(r[2]))] = (int(r[3]) / scale, int(r[4]))
     return d
 
-def save_obs(d):
-    with open(OBS, "w", newline="") as f:
-        w = csv.writer(f); w.writerow(["date", "iy", "ix", "red_minus_swir_x1e5", "n"])
-        for (date, iy, ix), (v, n) in sorted(d.items()): w.writerow([date, iy, ix, round(v * 1e5), n])
+def write_csv(d, path, col, scale):
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f); w.writerow(["date", "iy", "ix", col, "n"])
+        for (date, iy, ix), (v, n) in sorted(d.items()): w.writerow([date, iy, ix, round(v * scale), n])
 
-def ingest(start, end):
-    obs = load_obs()
-    items = sorted(stac_items(start, end), key=lambda f: f["properties"]["datetime"])
+def load_store(store, path=None):
+    """path を渡せばその1ファイル、無ければ obs/<種類>_YYYY.csv をすべて"""
+    prefix, _, scale = store
+    files = [path] if path else sorted(glob.glob(os.path.join(OBS_DIR, f"{prefix}_*.csv")))
+    d = {}
+    for f in files:
+        if os.path.exists(f): d.update(read_csv(f, scale))
+    return d
+
+def save_store(d, store, path=None):
+    prefix, col, scale = store
+    if path: write_csv(d, path, col, scale); return
+    os.makedirs(OBS_DIR, exist_ok=True)
+    by = {}
+    for k, v in d.items(): by.setdefault(k[0][:4], {})[k] = v
+    for y, dd in by.items(): write_csv(dd, os.path.join(OBS_DIR, f"{prefix}_{y}.csv"), col, scale)
+
+def load_obs(path=None): return load_store(S2_STORE, path)
+def save_obs(d, path=None): save_store(d, S2_STORE, path)
+
+def ingest(start, end, path=None, regions=None):
+    obs = load_obs(path)
+    items = sorted(stac_items(start, end, regions=regions), key=lambda f: f["properties"]["datetime"])
     print(f"{len(items)} 枚", flush=True)
     def work(it):
         try: return it, process(it), None
@@ -139,8 +185,8 @@ def ingest(start, end):
                 old = obs.get((date, iy, ix))
                 if old is None or n > old[1]: obs[(date, iy, ix)] = (v, n)   # 隣のタイルと重なる区画は晴れた画素の多い方
             print(f"  {k+1}/{len(items)} {it['id']} 区画{len(res)}", flush=True)
-            if (k + 1) % 50 == 0: save_obs(obs)
-    save_obs(obs)
+            if (k + 1) % 50 == 0: save_obs(obs, path)
+    save_obs(obs, path)
     return obs
 
 def doy_dist(a, b):
@@ -192,7 +238,10 @@ def write_latest(obs, today, cells=None, extra=None):
 if __name__ == "__main__":
     cmd = sys.argv[1]
     if cmd == "backfill":
-        ingest(sys.argv[2], sys.argv[3])
+        out = sys.argv[4] if len(sys.argv) > 4 and sys.argv[4] != "-" else None
+        # 範囲の番号を渡すと、その範囲に掛かる画像だけを探す(区画は全範囲で切るので、境目の区画も欠けない)
+        rg = [REGIONS[int(i)] for i in sys.argv[5].split(",")] if len(sys.argv) > 5 else None
+        ingest(sys.argv[2], sys.argv[3], out, rg)
     elif cmd == "daily":
         t = dt.date.today()
         obs = ingest((t - dt.timedelta(days=3)).isoformat(), t.isoformat())
