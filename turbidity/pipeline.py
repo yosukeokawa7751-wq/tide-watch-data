@@ -1,7 +1,11 @@
 """海岸沿いの区画ごとに、Sentinel-2 の画像から「いつもより濁っているか」を出す。
 
 - 区画は緯度 DLAT × 経度 DLON（約2km四方）。時計は現在地から同じ式で区画の番号を出す
-- 濁りの量は 赤（B04）の水面反射率の中央値。雲・影・陸を SCL で除き、晴れた水面だけを使う
+- 濁りの量は **赤（B04）− 短波赤外（B11）** の水面反射率の中央値。雲・影・陸を SCL で除き、晴れた水面だけを使う。
+  短波赤外は水に吸収されて水中からはほぼ返らないので、そこに出る分は水面の照り返し・もや。赤だけだと多くの日で
+  赤の値の大半がこれで（2026-10-08 館山湾の真ん中: 赤0.0257 / 短波赤外0.0200）、照り返しの多い日を「濁り」と読んでいた。
+  引いた後も 10/10 の船形の周りは強のまま（いつもの1.5〜2.8倍）。Sentinel-3 の濁り推定との「場所の並び」の順位相関も
+  0.25→0.31（日ごとは多くの日で0.4〜0.8）に上がった（2026-10-11）
 - 「いつもより」は、同じ区画の過去の観測のうち、年をまたいで同じ時季（±WINDOW_DAYS）のものと比べる。
   夏はプランクトンや照り返しで赤が秋の数倍になるため（館山湾の中央: 6月0.092 / 10月0.013）、値そのものでは決めない
 - 段階: 2=強（同じ時季の上位1割かつ中央値の1.5倍以上） 1=やや強（上位4分の1かつ1.25倍以上） 0=なし
@@ -87,14 +91,16 @@ def process(item):
     a = item["assets"]
     scl, tr, crs = read(a["scl"]["href"])
     red, _, _ = read(a["red"]["href"])
-    assert red.shape == scl.shape, (red.shape, scl.shape)
+    sw, _, _ = read(a["swir16"]["href"])
+    assert red.shape == scl.shape == sw.shape, (red.shape, scl.shape, sw.shape)
     key = cell_keys(tr, crs, scl.shape)
     inr = key >= 0
     water = (scl == SCL_WATER) & (red > 0) & inr
     obsc = np.isin(scl, SCL_OBSCURED) & inr
     out = {}
     if not water.any(): return out
-    kw, rv = key[water], red[water].astype(float) * 1e-4   # earth-search の COG は 0.1 の底上げを済ませてある(水面が負にならない)
+    # 照り返し・もやの分(短波赤外)を引く。earth-search の COG は 0.1 の底上げを済ませてある。引いた後は0以下もある(全体の16%)
+    kw, rv = key[water], (red[water].astype(float) - sw[water]) * 1e-4
     ko = key[obsc]
     oc = dict(zip(*np.unique(ko, return_counts=True)))
     order = np.argsort(kw); kw, rv = kw[order], rv[order]
@@ -108,13 +114,13 @@ def load_obs():
     d = {}
     if os.path.exists(OBS):
         for r in csv.reader(open(OBS)):
-            if r and r[0] != "date": d[(r[0], int(r[1]), int(r[2]))] = (int(r[3]) / 1e4, int(r[4]))
+            if r and r[0] != "date": d[(r[0], int(r[1]), int(r[2]))] = (int(r[3]) / 1e5, int(r[4]))
     return d
 
 def save_obs(d):
     with open(OBS, "w", newline="") as f:
-        w = csv.writer(f); w.writerow(["date", "iy", "ix", "red_x1e4", "n"])
-        for (date, iy, ix), (v, n) in sorted(d.items()): w.writerow([date, iy, ix, round(v * 1e4), n])
+        w = csv.writer(f); w.writerow(["date", "iy", "ix", "red_minus_swir_x1e5", "n"])
+        for (date, iy, ix), (v, n) in sorted(d.items()): w.writerow([date, iy, ix, round(v * 1e5), n])
 
 def ingest(start, end):
     obs = load_obs()
@@ -167,7 +173,8 @@ def write_latest(obs, today):
         if not recent: continue
         d = max(recent)
         lv, ratio, n = level_of(bc, cell, d)
-        if lv is None: continue
+        # 同じ時季の中央値が0以下(澄んだ沖で照り返しを引いた後)は「いつもの何%」が出せない。段階も0なので載せない
+        if lv is None or ratio is None: continue
         cells[f"{cell[0]}_{cell[1]}"] = [d, lv, round(ratio * 100)]
     out = {"v": 1, "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
            "grid": {"lat0": LAT0, "lon0": LON0, "dlat": DLAT, "dlon": DLON},
