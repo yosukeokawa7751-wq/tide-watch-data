@@ -1,5 +1,5 @@
 # 衛星(Sentinel-2)の画像から、海岸沿いの区画ごとの「いつもより濁っているか」を毎日出す。
-# 時計アプリ(タイド)は turbidity/latest.json だけを取りに来る。
+# 時計アプリ(タイド)は turbidity/latest.json だけを取りに来る(Sentinel-3 で埋めた区画も混ざる。2026-10-11〜)。
 # Sentinel-2 の撮影は日本時間10:37ごろ。公開は撮影の約4〜5時間後(実測 2026-10-11: Earth Search 3.8〜5.0時間)。
 # 1回は約40秒で終わるので、公開されうる 日本時間12〜18時は毎時、ほかに23時に回す(当日の画像を早く出すため)。
 name: turbidity
@@ -26,8 +26,9 @@ jobs:
           cache-dependency-path: turbidity/requirements.txt
       - run: pip install -r turbidity/requirements.txt
       - run: python turbidity/pipeline.py daily
-      # Sentinel-3(裏で記録。時計はまだ読まない)。撮影の約2時間後に公開されるので日本時間12時から拾える。
-      # 失敗しても Sentinel-2 の結果は出す
+      # Sentinel-3。撮影の約2時間後に公開されるので日本時間12時から拾える。
+      # Sentinel-2 で測れていない所だけを「やや濁り」までで latest.json に埋める(s3.py の merge)。
+      # 失敗しても Sentinel-2 だけの latest.json はそのまま出る
       - run: cd turbidity && python s3.py daily
         continue-on-error: true
         env:

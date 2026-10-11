@@ -165,7 +165,8 @@ def by_cell(obs):
     for (date, iy, ix), (v, n) in obs.items(): bc.setdefault((iy, ix), {})[date] = v
     return bc
 
-def write_latest(obs, today):
+def latest_cells(obs, today):
+    """区画ごとの、7日以内でいちばん新しい画像の段階 → {"iy_ix": [日付, 段階, いつもの何%]}"""
     bc = by_cell(obs)
     cells = {}
     for cell, dd in bc.items():
@@ -176,11 +177,15 @@ def write_latest(obs, today):
         # 同じ時季の中央値が0以下(澄んだ沖で照り返しを引いた後)は「いつもの何%」が出せない。段階も0なので載せない
         if lv is None or ratio is None: continue
         cells[f"{cell[0]}_{cell[1]}"] = [d, lv, round(ratio * 100)]
+    return cells
+
+def write_latest(obs, today, cells=None, extra=None):
+    if cells is None: cells = latest_cells(obs, today)
     out = {"v": 1, "generated": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%MZ"),
            "grid": {"lat0": LAT0, "lon0": LON0, "dlat": DLAT, "dlon": DLON},
            "maxAgeDays": MAX_AGE_DAYS,
            "source": "Contains modified Copernicus Sentinel data",
-           "cells": dict(sorted(cells.items()))}
+           "cells": dict(sorted(cells.items())), **(extra or {})}
     json.dump(out, open(LATEST, "w"), ensure_ascii=False, separators=(",", ":"))
     print(f"latest.json 区画{len(cells)}（強{sum(1 for c in cells.values() if c[1]==2)}・やや強{sum(1 for c in cells.values() if c[1]==1)}）")
 
