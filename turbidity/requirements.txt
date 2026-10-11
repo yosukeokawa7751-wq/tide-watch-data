@@ -1,0 +1,3 @@
+numpy==2.*
+rasterio==1.5.*
+pyproj==3.*
