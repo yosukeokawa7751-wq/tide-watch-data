@@ -1,8 +1,9 @@
 """Sentinel-3 OLCI L2 WFR の濁り推定(TSM_NN)を区画ごとに出し、**Sentinel-2 の補いとして latest.json に混ぜる**(2026-10-11〜)。
+2026-10-15〜: Sentinel-2 が2日より古い区画は、より新しい Sentinel-3 に替える(→ merge)。
 
 【補いだけ・「やや濁り」まで】(ユーザー判断 2026-10-11「A」) 過去3年で Sentinel-2 と段階がほぼ一致しない(κ=0.04・
 S2 が強の日のうち S3 も強は15%)。一方で測れる日は5倍あり(船形の近くで年36日 → 177日)、10/09 の船形を
-強(216%)と出せたのは S3 だけだった。どちらが正しいかは決められないので、**S3 は S2 で測れていない所だけを埋め、
+強(216%)と出せたのは S3 だけだった。どちらが正しいかは決められないので、**S3 は S2 で測れていない所(2026-10-15〜: S2 が古い所も)だけを埋め、
 段階は最大1に抑える**(→ merge)。
 
 - 区画・「同じ時季のいつもと比べる」段階の決め方は pipeline.py と同じ(level_of をそのまま使う)
@@ -129,30 +130,32 @@ def write_latest(obs, today):
     json.dump(d, open(LATEST, "w"), ensure_ascii=False, separators=(",", ":"))
 
 S3_MAX_LEVEL = 1
-# 時計の WatchTurbidity.searchCells(自分から2区画先まで)と同じ値。変える時は両方
-WATCH_SEARCH_CELLS = 2
+# Sentinel-2 がこの日数より古い区画は、より新しい Sentinel-3 に替える(K2b。ユーザー判断 2026-10-15「5日前の情報では遅すぎる」)
+S2_FRESH_DAYS = 2
 
-def merge(c2, c3):
-    """**S2 で測れていない所だけ S3 で埋める**。S3 の段階は最大1(やや濁り)に抑え、「いつもどおり」も載せる。
-    S3 の区画は、周り4区画(時計が見る5×5が重なりうる範囲)に7日以内の S2 が1つも無い時だけ足す。
-    → 時計の5×5の中に S2 と S3 が混ざることは無く、**S2 が見える場所の印は S2 だけの時と同じ**。
-    (S3 の「やや」の区画だけを足すと、それが常に「いちばん新しい画像」になり、船形でやや濁りが
-     出る日が 9% → 47% に増えた。2023〜2025年の実測)
+def merge(c2, c3, today):
+    """**区画ごとに新しい方を使う**。S2 が2日以内ならS2、それより古くて S3 の方が新しければ S3(段階は最大1)。
+    時計は「同じ日なら S2 を先に」選ぶ(→ WatchTurbidity。どれが S3 かは返り値の2つ目を "s3" として載せる)。
+    【前の決め方(〜10/15)】周り4区画に7日以内の S2 があれば S3 を足さなかった。そのため千葉港では 10/10 の S2 が
+    10/15 まで出続けた(S3 は毎日測れていた)。過去3年・範囲内46地点で比べた結果(実測):
+    出る画像の古さ 平均2.4日前 → 1.2日前、前日以内の画像の日 41% → 66%。濁り強の日 13.8% → 6.2%
+    (減ったのは主に、数日前の S2 の強を出し続けていた日。S3 は強を出さないので、本当に強い日も「やや」になる)。
+    船形 10/09 の「やや濁り」と 10/10 の「濁り強」は残る。
     返り値は (区画, S3 を使った区画の名前)"""
-    out, used = dict(c2), []
-    R = 2 * WATCH_SEARCH_CELLS
-    have2 = [tuple(map(int, k.split("_"))) for k in c2]
-    for k, (d3, lv3, pct3) in c3.items():
-        y, x = map(int, k.split("_"))
-        if any(abs(y - sy) <= R and abs(x - sx) <= R for sy, sx in have2): continue
-        out[k] = [d3, min(lv3, S3_MAX_LEVEL), pct3]; used.append(k)
+    out, used = {}, []
+    for k in set(c2) | set(c3):
+        r2, r3 = c2.get(k), c3.get(k)
+        if r2 and (today - dt.date.fromisoformat(r2[0])).days <= S2_FRESH_DAYS: out[k] = r2
+        elif r3 and (not r2 or r3[0] > r2[0]):
+            out[k] = [r3[0], min(r3[1], S3_MAX_LEVEL), r3[2]]; used.append(k)
+        else: out[k] = r2
     return out, sorted(used)
 
 def write_merged(obs3, today):
     """latest.json を S2 の記録から作り直し、S3 を混ぜる(何度回しても同じ結果になる)"""
     c2 = p.latest_cells(p.load_obs(), today)
-    cells, used = merge(c2, p.latest_cells(obs3, today))
-    # "s3" は S3 で埋めた区画(時計は読まない。後から数えるため)。cells の形は変えない(古い時計が読めなくなる)
+    cells, used = merge(c2, p.latest_cells(obs3, today), today)
+    # "s3" は S3 を使った区画(時計は「同じ日なら S2 を先に」に使う。2026-10-15〜)。cells の形は変えない(古い時計が読めなくなる)
     p.write_latest(None, today, cells=cells, extra={"s3": used})
     print(f"latest.json に S3 を混ぜた: S2 {len(c2)}区画 + S3 {len(used)}区画(うちやや濁り {sum(1 for k in used if cells[k][1] == 1)})")
 
