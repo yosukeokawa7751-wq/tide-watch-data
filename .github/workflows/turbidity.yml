@@ -42,3 +42,25 @@ jobs:
           git add turbidity/latest_s3.json 2>/dev/null || true
           git diff --cached --quiet || git commit -m "turbidity: $(date -u +%Y-%m-%dT%H:%MZ)"
           git push
+      # 時計の配信元を自分のドメイン(data.yo-su.com)につないだ Cloudflare R2 へ移す(2026-11-07 ユーザー判断)。
+      # raw.githubusercontent.com は未認証の取得に上限があり・アカウント名に縛られ・アプリの公開後は替えられないため
+      # (→ tide-watch の docs/sales-readiness.md)。同じ latest.json を同じパスに置く。
+      # 鍵が Secrets に入るまでは何もしない。GitHub への commit は時計が移り終わるまで残す(commit の後に置くのはそのため)。
+      # max-age=300 は raw.githubusercontent.com と同じ。チェックサムの2つは AWS CLI の新しい既定が R2 と合わない時の保険
+      - name: upload to R2
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
+          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+          R2_BUCKET: tide-watch-data
+        run: |
+          if [ -z "$AWS_ACCESS_KEY_ID" ] || [ -z "$AWS_SECRET_ACCESS_KEY" ] || [ -z "$R2_ACCOUNT_ID" ]; then
+            echo "R2 の鍵が Secrets に無いので飛ばす"; exit 0
+          fi
+          aws s3 cp turbidity/latest.json "s3://$R2_BUCKET/turbidity/latest.json" \
+            --endpoint-url "https://$R2_ACCOUNT_ID.r2.cloudflarestorage.com" \
+            --content-type "application/json" --cache-control "max-age=300" --only-show-errors
+          echo "R2 へ置いた: $(wc -c < turbidity/latest.json)B"
